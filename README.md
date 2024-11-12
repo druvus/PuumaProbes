@@ -23,7 +23,7 @@ PuumaProbes is developed to facilitate the design of probes for Puumala virus, a
 - **Conda:** For environment management. [Install Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html)
 - **Snakemake:** Workflow management system.
   ```bash
-  conda install -c bioconda snakemake
+  conda install -c conda-forge -c bioconda snakemake
   ```
 
 ## Installation
