@@ -1,0 +1,58 @@
+# config.yaml
+
+# Input files for Puumala virus segments
+puumala_segments:
+  L: "data/puumala_L.fasta"
+  M: "data/puumala_M.fasta"
+  S: "data/puumala_S.fasta"
+
+# Input files for other orthohantavirus segments
+orthohanta_segments:
+  L: "data/orthohanta_L.fasta"
+  M: "data/orthohanta_M.fasta"
+  S: "data/orthohanta_S.fasta"
+
+# Blacklist FASTA files
+blacklist_files:
+  - "data/blacklist_1.fasta"
+  - "data/blacklist_2.fasta"
+  # Add more blacklist files as needed
+
+# Probe design parameters
+probe_design:
+  probe_length: 120
+  puumala:
+    mismatches: 2
+    lcf_thres: 100
+    coverage: 1.0
+    probe_stride_full: 60
+    probe_stride_ends: 30
+    segment_end_size: 500  # Size of the segment ends (flanks) in bp
+  orthohanta:
+    mismatches: 5
+    lcf_thres: 90
+    coverage: 1.0
+    probe_stride: 60
+
+# Analysis parameters
+analysis:
+  mismatches_puumala: 2
+  lcf_thres_puumala: 100
+  mismatches_orthohanta: 5
+  lcf_thres_orthohanta: 90
+
+# Output directories
+output_dirs:
+  probes: "results/probes"
+  segments: "results/segments"
+  blacklist: "results/blacklist"
+  analysis: "results/analysis"
+
+# Conda environments directory
+conda_envs: "envs"
+
+# Logging directory
+logs_dir: "logs"
+
+# Other parameters
+max_cores: 10  # Adjust based on your system
