@@ -28,22 +28,6 @@ rule all:
         os.path.join(output_dirs["probes"], "final_probe_set.fasta"),
         os.path.join(output_dirs["analysis"], "coverage_analysis.txt")
 
-# Rule to concatenate blacklist FASTA files
-rule concatenate_blacklist:
-    input:
-        blacklist_files
-    output:
-        blacklist=os.path.join(output_dirs["blacklist"], "combined_blacklist.fasta")
-    params:
-        output_dir=output_dirs["blacklist"]
-    log:
-        os.path.join(logs_dir, "concatenate_blacklist.log")
-    shell:
-        """
-        mkdir -p {params.output_dir}
-        cat {input} > {output.blacklist} 2> {log}
-        """
-
 # Rule to extract segment ends for Puumala virus
 rule extract_puumala_segment_ends:
     input:
@@ -78,7 +62,7 @@ rule extract_puumala_segment_ends:
 rule design_probes_puumala_ends:
     input:
         ends=os.path.join(output_dirs["segments"], "puumala_{segment}_ends.fasta"),
-        blacklist=os.path.join(output_dirs["blacklist"], "combined_blacklist.fasta")
+        blacklist=blacklist_files  # Accept multiple blacklist files
     output:
         probes=os.path.join(output_dirs["probes"], "puumala_{segment}_ends_probes.fasta")
     params:
@@ -110,7 +94,7 @@ rule design_probes_puumala_ends:
 rule design_probes_puumala_full:
     input:
         genome=lambda wildcards: puumala_segments[wildcards.segment],
-        blacklist=os.path.join(output_dirs["blacklist"], "combined_blacklist.fasta")
+        blacklist=blacklist_files  # Accept multiple blacklist files
     output:
         probes=os.path.join(output_dirs["probes"], "puumala_{segment}_full_probes.fasta")
     params:
@@ -142,7 +126,7 @@ rule design_probes_puumala_full:
 rule design_probes_orthohanta:
     input:
         genome=lambda wildcards: orthohanta_segments[wildcards.segment],
-        blacklist=os.path.join(output_dirs["blacklist"], "combined_blacklist.fasta")
+        blacklist=blacklist_files  # Accept multiple blacklist files
     output:
         probes=os.path.join(output_dirs["probes"], "orthohanta_{segment}_probes.fasta")
     params:
@@ -188,7 +172,7 @@ rule combine_probes:
         cat {input.puumala_ends} {input.puumala_full} {input.orthohanta} > {output.combined} 2> {log}
         """
 
-# Rule to deduplicate probes
+# Rule to deduplicate probes and log counts before and after deduplication
 rule deduplicate_probes:
     input:
         combined=os.path.join(output_dirs["probes"], "combined_probes.fasta")
@@ -202,8 +186,41 @@ rule deduplicate_probes:
         os.path.join(conda_envs, "seqkit.yaml")
     shell:
         """
+        # Ensure the output directory exists
         mkdir -p {params.output_dir}
-        seqkit rmdup {input.combined} -o {output.deduplicated} > {log} 2>&1
+
+        # Start Deduplication Report
+        echo "=== Deduplication Report ===" >> {log}
+
+        # Count probes before deduplication
+        echo "Number of probes before deduplication:" >> {log}
+        BEFORE=$(seqkit stats {input.combined} | awk 'NR==2 {{print $4}}')
+        echo $BEFORE >> {log}
+
+        # Total length before deduplication
+        TOTAL_BEFORE=$(seqkit stats {input.combined} | awk 'NR==2 {{print $5}}')
+        echo "Total length of probes before deduplication: $TOTAL_BEFORE" >> {log}
+
+        # Perform deduplication using seqkit
+        seqkit rmdup {input.combined} -o {output.deduplicated} >> {log} 2>&1
+
+        # Count probes after deduplication
+        echo "Number of probes after deduplication:" >> {log}
+        AFTER=$(seqkit stats {output.deduplicated} | awk 'NR==2 {{print $4}}')
+        echo $AFTER >> {log}
+
+        # Total length after deduplication
+        TOTAL_AFTER=$(seqkit stats {output.deduplicated} | awk 'NR==2 {{print $5}}')
+        echo "Total length of probes after deduplication: $TOTAL_AFTER" >> {log}
+
+        # Calculate duplicates removed
+        DUPLICATES_REMOVED=$((BEFORE - AFTER))
+        PERCENT_REMOVED=$(echo "scale=2; ($DUPLICATES_REMOVED/$BEFORE)*100" | bc)
+        echo "Number of duplicate probes removed: $DUPLICATES_REMOVED" >> {log}
+        echo "Percentage of duplicate probes removed: $PERCENT_REMOVED%" >> {log}
+
+        # End Deduplication Report
+        echo "============================" >> {log}
         """
 
 # Rule to finalize the probe set
@@ -220,12 +237,13 @@ rule final_probe_set:
         cp {input.deduplicated} {output.final}
         """
 
-# Rule to analyze probe coverage
+# Rule to analyze probe coverage, including coverage for Puumala flanks
 rule analyze_probe_coverage:
     input:
         probes=os.path.join(output_dirs["probes"], "final_probe_set.fasta"),
-        puumala_genomes=list(puumala_segments.values()),
-        orthohanta_genomes=list(orthohanta_segments.values())
+        puumala_genomes=expand("{genome}", genome=puumala_segments.values()),
+        orthohanta_genomes=expand("{genome}", genome=orthohanta_segments.values()),
+        puumala_flanks=expand(os.path.join(output_dirs["segments"], "puumala_{segment}_ends.fasta"), segment=segments)
     output:
         coverage=os.path.join(output_dirs["analysis"], "coverage_analysis.txt")
     params:
@@ -240,26 +258,49 @@ rule analyze_probe_coverage:
         os.path.join(conda_envs, "catch.yaml")
     shell:
         """
+        # Ensure the output directory exists
         mkdir -p {params.output_dir}
         
-        # Analyze coverage for Puumala virus
+        # Start Coverage Analysis Report with timestamp
+        echo "=== Coverage Analysis Report - $(date) ===" >> {log}
+        
+        # Analyze coverage for Puumala virus full genomes
+        echo "Analyzing coverage for Puumala virus full genomes..." >> {log}
         analyze_probe_coverage.py \
             -d {input.puumala_genomes} \
             -f {input.probes} \
             -m {params.m_puumala} \
             -l {params.l_puumala} \
-            --print-analysis > {params.output_dir}/puumala_coverage.txt 2>> {log}
+            --print-analysis > {params.output_dir}/puumala_full_coverage.txt 2>> {log}
+        echo "Completed coverage analysis for Puumala virus full genomes." >> {log}
         
-        echo "\nCoverage Analysis for Other Orthohantaviruses" >> {params.output_dir}/puumala_coverage.txt
+        # Analyze coverage for Puumala virus flanks
+        echo "\nAnalyzing coverage for Puumala virus flanks..." >> {log}
+        analyze_probe_coverage.py \
+            -d {input.puumala_flanks} \
+            -f {input.probes} \
+            -m {params.m_puumala} \
+            -l {params.l_puumala} \
+            --print-analysis > {params.output_dir}/puumala_flanks_coverage.txt 2>> {log}
+        echo "Completed coverage analysis for Puumala virus flanks." >> {log}
         
-        # Analyze coverage for other orthohantaviruses
+        # Analyze coverage for other Orthohantaviruses
+        echo "\nAnalyzing coverage for other Orthohantaviruses..." >> {log}
         analyze_probe_coverage.py \
             -d {input.orthohanta_genomes} \
             -f {input.probes} \
             -m {params.m_orthohanta} \
             -l {params.l_orthohanta} \
             --print-analysis > {params.output_dir}/orthohanta_coverage.txt 2>> {log}
+        echo "Completed coverage analysis for other Orthohantaviruses." >> {log}
         
-        # Combine coverage reports
-        cat {params.output_dir}/puumala_coverage.txt {params.output_dir}/orthohanta_coverage.txt > {output.coverage}
+        # Combine all coverage reports into a single file
+        echo "\nCombining all coverage reports into a single file..." >> {log}
+        cat {params.output_dir}/puumala_full_coverage.txt \
+            {params.output_dir}/puumala_flanks_coverage.txt \
+            {params.output_dir}/orthohanta_coverage.txt > {output.coverage} 2>> {log}
+        echo "Combined coverage analysis report created at {output.coverage}" >> {log}
+        
+        # End Coverage Analysis Report
+        echo "=== Coverage Analysis Completed ===" >> {log}
         """
