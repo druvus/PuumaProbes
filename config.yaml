@@ -26,7 +26,7 @@ probe_design:
     lcf_thres: 100
     coverage: 1.0
     probe_stride_full: 60
-    probe_stride_ends: 60
+    probe_stride_ends: 30
     segment_end_size: 500  # Size of the segment ends (flanks) in bp
   orthohanta:
     mismatches: 5
