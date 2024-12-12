@@ -27,13 +27,18 @@ probe_design:
     coverage: 1.0
     probe_stride: 60
     segment_end_stride: 30
-    # Size of the segment ends (flanks) in bp
     segment_end_size: 500
+    overlap: 50
+
   orthohanta:
     mismatches: 5
     lcf_thres: 90
     coverage: 1.0
     probe_stride: 60
+
+  design_puumala_ends: True       # make designing puumala ends optional
+  use_lsh_minhash: False          # enable/disable LSH MinHash filtering
+  lsh_minhash_threshold: 0.6      # threshold for LSH MinHash filtering
 
 # Analysis parameters
 analysis:
