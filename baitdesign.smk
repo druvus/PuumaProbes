@@ -14,35 +14,60 @@ max_cores = config["max_cores"]
 conda_envs = config["conda_envs"]
 logs_dir = config["logs_dir"]
 
-# Create lists of segments
+# Parameters for optional behavior and filtering
+design_puumala_ends = probe_design.get("design_puumala_ends", True)
+use_lsh_minhash = probe_design.get("use_lsh_minhash", False)
+lsh_minhash_threshold = probe_design.get("lsh_minhash_threshold", 0.6)
+
 segments = ["L", "M", "S"]
 
-# Ensure log directory exists
 os.makedirs(logs_dir, exist_ok=True)
 
-# Define the final outputs of the pipeline
 rule all:
     input:
         os.path.join(output_dirs["probes"], "final_probe_set.fasta"),
         os.path.join(output_dirs["analysis"], "coverage_analysis.txt")
 
 #####################################
+# Helper Functions
+#####################################
+
+def design_command_params(pl, ps, m, l, output, input_file):
+    cmd = [
+        "design.py",
+        "-pl", str(pl),
+        "-ps", str(ps),
+        "-m", str(m),
+        "-l", str(l),
+        "--skip-set-cover"
+    ]
+    # Include blacklist files
+    for blk in blacklist_files:
+        cmd.extend(["--avoid-genomes", blk])
+    # Add LSH MinHash if enabled
+    if use_lsh_minhash:
+        cmd.extend(["--filter-with-lsh-minhash", str(lsh_minhash_threshold)])
+    # Add output and input
+    cmd.extend(["-o", output, input_file])
+    return " ".join(cmd)
+
+#####################################
 # Step 1: Design
 #####################################
 
-# Corrected rule to extract segment ends and middles for Puumala virus
 rule extract_puumala_segments:
     input:
-        genome=lambda wildcards: puumala_segments[wildcards.segment]
+        genome=lambda w: puumala_segments[w.segment]
     output:
         ends=os.path.join(output_dirs["segments"], "puumala_{segment}_ends.fasta"),
         middles=os.path.join(output_dirs["segments"], "puumala_{segment}_middles.fasta")
     params:
         end_size=probe_design["puumala"]["segment_end_size"],
-        start_middle=lambda wildcards: probe_design["puumala"]["segment_end_size"] + 1,
-        end_middle=lambda wildcards: -(probe_design["puumala"]["segment_end_size"] + 1),
+        overlap=probe_design["puumala"]["overlap"],
+        start_middle=lambda w: probe_design["puumala"]["segment_end_size"] + 1 - probe_design["puumala"]["overlap"],
+        end_middle=lambda w: -(probe_design["puumala"]["segment_end_size"] + 1 - probe_design["puumala"]["overlap"]),
         output_dir=output_dirs["segments"],
-        temp_dir=lambda wildcards: os.path.join(output_dirs["segments"], f"temp_{wildcards.segment}")
+        temp_dir=lambda w: os.path.join(output_dirs["segments"], f"temp_{w.segment}")
     log:
         os.path.join(logs_dir, "extract_puumala_segments_{segment}.log")
     conda:
@@ -50,24 +75,14 @@ rule extract_puumala_segments:
     shell:
         """
         mkdir -p {params.temp_dir}
-        # Extract first {params.end_size} bp
         seqkit subseq --region 1:{params.end_size} --update-faidx {input.genome} > {params.temp_dir}/puumala_{wildcards.segment}_5prime.fasta 2>> {log}
-
-        # Extract last {params.end_size} bp
         seqkit subseq --region -{params.end_size}:-1 --update-faidx {input.genome} > {params.temp_dir}/puumala_{wildcards.segment}_3prime.fasta 2>> {log}
-
-        # Combine the ends
         cat {params.temp_dir}/puumala_{wildcards.segment}_5prime.fasta {params.temp_dir}/puumala_{wildcards.segment}_3prime.fasta > {output.ends} 2>> {log}
 
-        # Extract middle region
         seqkit subseq --region {params.start_middle}:{params.end_middle} --update-faidx {input.genome} > {output.middles} 2>> {log}
-
-        # Clean up temporary files
         rm -r {params.temp_dir}
         """
 
-
-# Rule to design probes for Puumala segment ends with higher density (2x coverage)
 rule design_probes_puumala_ends:
     input:
         ends=os.path.join(output_dirs["segments"], "puumala_{segment}_ends.fasta")
@@ -78,7 +93,18 @@ rule design_probes_puumala_ends:
         ps=probe_design["puumala"]["segment_end_stride"],
         m=probe_design["puumala"]["mismatches"],
         l=probe_design["puumala"]["lcf_thres"],
-        output_dir=output_dirs["probes"]
+        output_dir=output_dirs["probes"],
+        command=lambda wildcards, input, output: (
+            f"touch {output.probes}" if not design_puumala_ends 
+            else design_command_params(
+                probe_design["probe_length"],
+                probe_design["puumala"]["segment_end_stride"],
+                probe_design["puumala"]["mismatches"],
+                probe_design["puumala"]["lcf_thres"],
+                output.probes,
+                input.ends
+            )
+        )
     log:
         os.path.join(logs_dir, "design_probes_puumala_ends_{segment}.log")
     conda:
@@ -86,49 +112,41 @@ rule design_probes_puumala_ends:
     shell:
         """
         mkdir -p {params.output_dir}
-        design.py \
-            -pl {params.pl} \
-            -ps {params.ps} \
-            -m {params.m} \
-            -l {params.l} \
-            --skip-set-cover \
-            -o {output.probes} \
-            {input.ends} > {log} 2>&1
+        {params.command} > {log} 2>&1
         """
 
-# Rule to design probes for Puumala segment middles (1x coverage)
-rule design_probes_puumala_middles:
+rule design_probes_puumala:
     input:
-        middles=os.path.join(output_dirs["segments"], "puumala_{segment}_middles.fasta")
+        genome=lambda w: puumala_segments[w.segment]
     output:
-        probes=os.path.join(output_dirs["probes"], "puumala_{segment}_middles_probes.fasta")
+        probes=os.path.join(output_dirs["probes"], "puumala_{segment}_probes.fasta")
     params:
         pl=probe_design["probe_length"],
         ps=probe_design["puumala"]["probe_stride"],
         m=probe_design["puumala"]["mismatches"],
         l=probe_design["puumala"]["lcf_thres"],
-        output_dir=output_dirs["probes"]
+        output_dir=output_dirs["probes"],
+        command=lambda wildcards, input, output: design_command_params(
+            probe_design["probe_length"],
+            probe_design["puumala"]["probe_stride"],
+            probe_design["puumala"]["mismatches"],
+            probe_design["puumala"]["lcf_thres"],
+            output.probes,
+            input.genome
+        )
     log:
-        os.path.join(logs_dir, "design_probes_puumala_middles_{segment}.log")
+        os.path.join(logs_dir, "design_probes_puumala_{segment}.log")
     conda:
         os.path.join(conda_envs, "catch.yaml")
     shell:
         """
         mkdir -p {params.output_dir}
-        design.py \
-            -pl {params.pl} \
-            -ps {params.ps} \
-            -m {params.m} \
-            -l {params.l} \
-            --skip-set-cover \
-            -o {output.probes} \
-            {input.middles} > {log} 2>&1
+        {params.command} > {log} 2>&1
         """
 
-# Rule to design probes for other orthohantaviruses (1x coverage)
 rule design_probes_orthohanta:
     input:
-        genome=lambda wildcards: orthohanta_segments[wildcards.segment]
+        genome=lambda w: orthohanta_segments[w.segment]
     output:
         probes=os.path.join(output_dirs["probes"], "orthohanta_{segment}_probes.fasta")
     params:
@@ -136,7 +154,15 @@ rule design_probes_orthohanta:
         ps=probe_design["orthohanta"]["probe_stride"],
         m=probe_design["orthohanta"]["mismatches"],
         l=probe_design["orthohanta"]["lcf_thres"],
-        output_dir=output_dirs["probes"]
+        output_dir=output_dirs["probes"],
+        command=lambda wildcards, input, output: design_command_params(
+            probe_design["probe_length"],
+            probe_design["orthohanta"]["probe_stride"],
+            probe_design["orthohanta"]["mismatches"],
+            probe_design["orthohanta"]["lcf_thres"],
+            output.probes,
+            input.genome
+        )
     log:
         os.path.join(logs_dir, "design_probes_orthohanta_{segment}.log")
     conda:
@@ -144,25 +170,23 @@ rule design_probes_orthohanta:
     shell:
         """
         mkdir -p {params.output_dir}
-        design.py \
-            -pl {params.pl} \
-            -ps {params.ps} \
-            -m {params.m} \
-            -l {params.l} \
-            --skip-set-cover \
-            -o {output.probes} \
-            {input.genome} > {log} 2>&1
+        {params.command} > {log} 2>&1
         """
 
 #####################################
 # Step 2: Combine-Filter
 #####################################
 
-# Rule to combine all candidate probes into a single FASTA file
+def conditional_puumala_ends():
+    if design_puumala_ends:
+        return expand(os.path.join(output_dirs["probes"], "puumala_{segment}_ends_probes.fasta"), segment=segments)
+    else:
+        return []
+
 rule combine_candidate_probes:
     input:
-        puumala_ends=expand(os.path.join(output_dirs["probes"], "puumala_{segment}_ends_probes.fasta"), segment=segments),
-        puumala_middles=expand(os.path.join(output_dirs["probes"], "puumala_{segment}_middles_probes.fasta"), segment=segments),
+        puumala_ends=conditional_puumala_ends(),
+        puumala=expand(os.path.join(output_dirs["probes"], "puumala_{segment}_probes.fasta"), segment=segments),
         orthohanta=expand(os.path.join(output_dirs["probes"], "orthohanta_{segment}_probes.fasta"), segment=segments)
     output:
         combined=os.path.join(output_dirs["probes"], "all_candidate_probes.fasta")
@@ -173,17 +197,15 @@ rule combine_candidate_probes:
     shell:
         """
         mkdir -p {params.output_dir}
-        cat {input.puumala_ends} {input.puumala_middles} {input.orthohanta} > {output.combined} 2> {log}
+        cat {input.puumala_ends} {input.puumala} {input.orthohanta} > {output.combined} 2> {log}
         """
 
-# Rule to perform set cover filtering and avoid host genomes
 rule filter_probes:
     input:
         candidate_probes=os.path.join(output_dirs["probes"], "all_candidate_probes.fasta"),
         puumala_ends=expand(os.path.join(output_dirs["segments"], "puumala_{segment}_ends.fasta"), segment=segments),
         puumala_middles=expand(os.path.join(output_dirs["segments"], "puumala_{segment}_middles.fasta"), segment=segments),
-        orthohanta=expand("{genome}", genome=orthohanta_segments.values()),
-        blacklist=blacklist_files
+        orthohanta=expand("{genome}", genome=orthohanta_segments.values())
     output:
         filtered_probes=os.path.join(output_dirs["probes"], "filtered_probes.fasta")
     params:
@@ -191,8 +213,7 @@ rule filter_probes:
         m=max(probe_design["puumala"]["mismatches"], probe_design["orthohanta"]["mismatches"]),
         l=min(probe_design["puumala"]["lcf_thres"], probe_design["orthohanta"]["lcf_thres"]),
         c=1.0,
-        output_dir=output_dirs["probes"],
-        blacklist=' '.join(blacklist_files)
+        output_dir=output_dirs["probes"]
     log:
         os.path.join(logs_dir, "filter_probes.log")
     conda:
@@ -208,12 +229,10 @@ rule filter_probes:
             -m {params.m} \
             -l {params.l} \
             -c {params.c} \
-            --avoid-genomes {params.blacklist} \
             --filter-from-fasta {input.candidate_probes} \
             -o {output.filtered_probes} > {log} 2>&1
         """
 
-# Rule to finalize the probe set
 rule final_probe_set:
     input:
         filtered_probes=os.path.join(output_dirs["probes"], "filtered_probes.fasta")
@@ -231,7 +250,6 @@ rule final_probe_set:
 # Step 3: Validate
 #####################################
 
-# Rule to analyze probe coverage using analyze_probe_coverage.py
 rule analyze_probe_coverage:
     input:
         probes=os.path.join(output_dirs["probes"], "final_probe_set.fasta"),
@@ -252,13 +270,9 @@ rule analyze_probe_coverage:
         os.path.join(conda_envs, "catch.yaml")
     shell:
         """
-        # Ensure the output directory exists
         mkdir -p {params.output_dir}
-        
-        # Start Coverage Analysis Report with timestamp
         echo "=== Coverage Analysis Report - $(date) ===" >> {log}
         
-        # Analyze coverage for Puumala virus full genomes
         echo "Analyzing coverage for Puumala virus full genomes..." >> {log}
         analyze_probe_coverage.py \
             -d {input.puumala_genomes} \
@@ -268,7 +282,6 @@ rule analyze_probe_coverage:
             --print-analysis > {params.output_dir}/puumala_full_coverage.txt 2>> {log}
         echo "Completed coverage analysis for Puumala virus full genomes." >> {log}
         
-        # Analyze coverage for Puumala virus flanks
         echo "\nAnalyzing coverage for Puumala virus flanks..." >> {log}
         analyze_probe_coverage.py \
             -d {input.puumala_flanks} \
@@ -278,7 +291,6 @@ rule analyze_probe_coverage:
             --print-analysis > {params.output_dir}/puumala_flanks_coverage.txt 2>> {log}
         echo "Completed coverage analysis for Puumala virus flanks." >> {log}
         
-        # Analyze coverage for other Orthohantaviruses
         echo "\nAnalyzing coverage for other Orthohantaviruses..." >> {log}
         analyze_probe_coverage.py \
             -d {input.orthohanta_genomes} \
@@ -288,13 +300,10 @@ rule analyze_probe_coverage:
             --print-analysis > {params.output_dir}/orthohanta_coverage.txt 2>> {log}
         echo "Completed coverage analysis for other Orthohantaviruses." >> {log}
         
-        # Combine all coverage reports into a single file
         echo "\nCombining all coverage reports into a single file..." >> {log}
         cat {params.output_dir}/puumala_full_coverage.txt \
             {params.output_dir}/puumala_flanks_coverage.txt \
             {params.output_dir}/orthohanta_coverage.txt > {output.coverage} 2>> {log}
         echo "Combined coverage analysis report created at {output.coverage}" >> {log}
-        
-        # End Coverage Analysis Report
         echo "=== Coverage Analysis Completed ===" >> {log}
         """
