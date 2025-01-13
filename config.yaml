@@ -22,19 +22,19 @@ blacklist_files:
 probe_design:
   probe_length: 120
   puumala:
-    mismatches: 2
+    mismatches: [2, 3] 
     lcf_thres: 100
     coverage: 1.0
-    probe_stride: 60
+    probe_stride: [60, 80]
     segment_end_stride: 30
     segment_end_size: 500
     overlap: 50
 
   orthohanta:
-    mismatches: 5
+    mismatches: [3, 5]
     lcf_thres: 90
     coverage: 1.0
-    probe_stride: 60
+    probe_stride: [60, 80]
 
   design_puumala_ends: True       # make designing puumala ends optional
   use_lsh_minhash: False          # enable/disable LSH MinHash filtering
@@ -53,6 +53,7 @@ output_dirs:
   segments: "results/segments"
   blacklist: "results/blacklist"
   analysis: "results/analysis"
+  mapping: "results/mapping"
 
 # Conda environments directory
 conda_envs: "envs"
@@ -62,3 +63,15 @@ logs_dir: "logs"
 
 # Other parameters
 max_cores: 10  # Adjust based on your system
+
+# Minimap2 parameters
+minimap2:
+  preset: "sr"          # e.g. "sr", "asm5", "map-ont", etc.
+  k: 19
+  w: 10
+  threads: 40
+  min_coverage: 40      # coverage threshold for filtering
+  min_identity: 0.3     # identity threshold for filtering
+
+# Folder containing reference genomes
+genome_folder: "data/results/genomes"
