@@ -67,6 +67,12 @@ def conditional_puumala_ends_probes():
     else:
         return []
 
+def get_unique_mismatches():
+    """Get unique mismatch values from both Puumala and Orthohanta configs."""
+    puumala_mismatches = set(probe_design["puumala"]["mismatches"])
+    orthohanta_mismatches = set(probe_design["orthohanta"]["mismatches"])
+    return sorted(list(puumala_mismatches.union(orthohanta_mismatches)))
+    
 ################################################
 # 3) Expansions for Designing Probes
 ################################################
@@ -147,10 +153,10 @@ matching_oligos_txt = [
     for paf in paf_files
 ]
 
-print("Number of genome files found:", len(genome_files))
-print("Genome IDs:", genome_ids)
-print("Number of PAF files to generate:", len(paf_files))
-print("Number of matching oligos files to generate:", len(matching_oligos_txt))
+# print("Number of genome files found:", len(genome_files))
+# print("Genome IDs:", genome_ids)
+# print("Number of PAF files to generate:", len(paf_files))
+# print("Number of matching oligos files to generate:", len(matching_oligos_txt))
 
 # Add at the beginning of the file after the config loading
 def debug_print_design_files():
@@ -162,7 +168,7 @@ def debug_print_design_files():
     for i, paf in enumerate(paf_files[:5]):  # Print first 5 for sample
         print(f"  {paf}")
 
-debug_print_design_files()
+#debug_print_design_files()
 
 
 ################################################
@@ -175,9 +181,9 @@ rule all:
       1) All design probes are generated
       2) They are mapped individually to each genome
       3) Matching oligos are filtered per design+genome
-      4) Candidate probes are combined & filtered
-      5) A final set of probes is produced
-      6) Coverage analysis is completed
+      4) Candidate probes are combined & filtered for each mismatch value
+      5) Final sets of probes are produced for each mismatch value
+      6) Coverage analysis is completed for each mismatch value
     """
     input:
         # 1) All design FASTAs
@@ -187,10 +193,16 @@ rule all:
         matching_oligos_txt,
         # 4) Combined candidate probes
         os.path.join(output_dirs["probes"], "all_candidate_probes.fasta"),
-        # 5) Final set
-        os.path.join(output_dirs["probes"], "final_probe_set.fasta"),
-        # 6) Coverage analysis
-        os.path.join(output_dirs["analysis"], "coverage_analysis.txt")
+        # 5) Final sets for each mismatch value
+        expand(
+            os.path.join(output_dirs["probes"], "final_probe_set_{m}.fasta"),
+            m=get_unique_mismatches()
+        ),
+        # 6) Coverage analysis for each mismatch value
+        expand(
+            os.path.join(output_dirs["analysis"], "coverage_analysis_{m}.txt"),
+            m=get_unique_mismatches()
+        )
 
 ################################################
 # Step 1: Extract segments
@@ -434,15 +446,16 @@ rule filter_probes:
         ),
         orthohanta=expand("{genome}", genome=orthohanta_segments.values())
     output:
-        filtered_probes=os.path.join(output_dirs["probes"], "filtered_probes.fasta")
+        filtered_probes=os.path.join(output_dirs["probes"], "filtered_probes_{m}.fasta")
     params:
         pl=probe_design["probe_length"],
-        m=max(puumala_mismatches + orthohanta_mismatches),
         l=min(probe_design["puumala"]["lcf_thres"], probe_design["orthohanta"]["lcf_thres"]),
         c=1.0,
         output_dir=output_dirs["probes"]
+    wildcard_constraints:
+        m="|".join(map(str, get_unique_mismatches()))
     log:
-        os.path.join(logs_dir, "filter_probes.log")
+        os.path.join(logs_dir, "filter_probes_{m}.log")
     conda:
         os.path.join(conda_envs, "catch.yaml")
     shell:
@@ -453,7 +466,7 @@ rule filter_probes:
             {input.puumala_middles} \
             {input.orthohanta} \
             -pl {params.pl} \
-            -m {params.m} \
+            -m {wildcards.m} \
             -l {params.l} \
             -c {params.c} \
             --filter-from-fasta {input.candidate_probes} \
@@ -462,14 +475,16 @@ rule filter_probes:
 
 rule final_probe_set:
     """
-    Copies the filtered_probes file to 'final_probe_set.fasta'.
+    Creates final probe sets for each mismatch value.
     """
     input:
-        filtered_probes=os.path.join(output_dirs["probes"], "filtered_probes.fasta")
+        filtered_probes=os.path.join(output_dirs["probes"], "filtered_probes_{m}.fasta")
     output:
-        final=os.path.join(output_dirs["probes"], "final_probe_set.fasta")
+        final=os.path.join(output_dirs["probes"], "final_probe_set_{m}.fasta")
     params:
         output_dir=output_dirs["probes"]
+    wildcard_constraints:
+        m="|".join(map(str, get_unique_mismatches()))
     shell:
         """
         mkdir -p {params.output_dir}
@@ -482,14 +497,10 @@ rule final_probe_set:
 
 rule analyze_probe_coverage:
     """
-    Uses analyze_probe_coverage.py to perform coverage analysis on:
-      1) Puumala full genomes
-      2) Puumala flanks
-      3) Other Orthohantaviruses
-    Then merges them into a single coverage report.
+    Uses analyze_probe_coverage.py to perform coverage analysis for each mismatch value.
     """
     input:
-        probes=os.path.join(output_dirs["probes"], "final_probe_set.fasta"),
+        probes=os.path.join(output_dirs["probes"], "final_probe_set_{m}.fasta"),
         puumala_genomes=expand("{genome}", genome=puumala_segments.values()),
         orthohanta_genomes=expand("{genome}", genome=orthohanta_segments.values()),
         puumala_flanks=expand(
@@ -497,15 +508,15 @@ rule analyze_probe_coverage:
             segment=segments
         )
     output:
-        coverage=os.path.join(output_dirs["analysis"], "coverage_analysis.txt")
+        coverage=os.path.join(output_dirs["analysis"], "coverage_analysis_{m}.txt")
     params:
-        m_puumala=analysis_params["mismatches_puumala"],
         l_puumala=analysis_params["lcf_thres_puumala"],
-        m_orthohanta=analysis_params["mismatches_orthohanta"],
         l_orthohanta=analysis_params["lcf_thres_orthohanta"],
         output_dir=output_dirs["analysis"]
+    wildcard_constraints:
+        m="|".join(map(str, get_unique_mismatches()))
     log:
-        os.path.join(logs_dir, "analyze_probe_coverage.log")
+        os.path.join(logs_dir, "analyze_probe_coverage_{m}.log")
     conda:
         os.path.join(conda_envs, "catch.yaml")
     shell:
@@ -517,36 +528,36 @@ rule analyze_probe_coverage:
         analyze_probe_coverage.py \
             -d {input.puumala_genomes} \
             -f {input.probes} \
-            -m {params.m_puumala} \
+            -m {wildcards.m} \
             -l {params.l_puumala} \
             --print-analysis \
-          > {params.output_dir}/puumala_full_coverage.txt 2>> {log}
+          > {params.output_dir}/puumala_full_coverage_{wildcards.m}.txt 2>> {log}
         echo "Completed coverage analysis for Puumala virus full genomes." >> {log}
         
         echo "\nAnalyzing coverage for Puumala virus flanks..." >> {log}
         analyze_probe_coverage.py \
             -d {input.puumala_flanks} \
             -f {input.probes} \
-            -m {params.m_puumala} \
+            -m {wildcards.m} \
             -l {params.l_puumala} \
             --print-analysis \
-          > {params.output_dir}/puumala_flanks_coverage.txt 2>> {log}
+          > {params.output_dir}/puumala_flanks_coverage_{wildcards.m}.txt 2>> {log}
         echo "Completed coverage analysis for Puumala virus flanks." >> {log}
         
         echo "\nAnalyzing coverage for other Orthohantaviruses..." >> {log}
         analyze_probe_coverage.py \
             -d {input.orthohanta_genomes} \
             -f {input.probes} \
-            -m {params.m_orthohanta} \
+            -m {wildcards.m} \
             -l {params.l_orthohanta} \
             --print-analysis \
-          > {params.output_dir}/orthohanta_coverage.txt 2>> {log}
+          > {params.output_dir}/orthohanta_coverage_{wildcards.m}.txt 2>> {log}
         echo "Completed coverage analysis for other Orthohantaviruses." >> {log}
         
         echo "\nCombining all coverage reports into a single file..." >> {log}
-        cat {params.output_dir}/puumala_full_coverage.txt \
-            {params.output_dir}/puumala_flanks_coverage.txt \
-            {params.output_dir}/orthohanta_coverage.txt \
+        cat {params.output_dir}/puumala_full_coverage_{wildcards.m}.txt \
+            {params.output_dir}/puumala_flanks_coverage_{wildcards.m}.txt \
+            {params.output_dir}/orthohanta_coverage_{wildcards.m}.txt \
           > {output.coverage} 2>> {log}
         echo "Combined coverage analysis report created at {output.coverage}" >> {log}
         echo "=== Coverage Analysis Completed ===" >> {log}
