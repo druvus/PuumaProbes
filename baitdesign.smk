@@ -175,6 +175,11 @@ def debug_print_design_files():
 # 6) rule all
 ################################################
 
+ruleorder: filter_high_host_hits > design_probes_puumala > design_probes_orthohanta > design_probes_puumala_ends
+
+wildcard_constraints:
+    design_stem="(puumala|orthohanta)_[LMS](_ends)?_ps\d+_m\d+"
+
 rule all:
     """
     The 'all' rule ensures:
@@ -184,6 +189,8 @@ rule all:
       4) Candidate probes are combined & filtered for each mismatch value
       5) Final sets of probes are produced for each mismatch value
       6) Coverage analysis is completed for each mismatch value
+      7) Host genome mapping counts are analyzed
+      8) Analysis of final probes in host genomes completed
     """
     input:
         # 1) All design FASTAs
@@ -202,7 +209,11 @@ rule all:
         expand(
             os.path.join(output_dirs["analysis"], "coverage_analysis_{m}.txt"),
             m=get_unique_mismatches()
-        )
+        ),
+        # 7) Host genome mapping analysis
+        os.path.join(output_dirs["analysis"], "host_probe_counts.txt"),
+        # 8) Filtered host mapping counts for final probes
+        os.path.join(output_dirs["analysis"], "final_probes_host_counts.txt")
 
 ################################################
 # Step 1: Extract segments
@@ -403,30 +414,74 @@ rule filter_paf:
           > {output.matching_oligos} 2> {log}
         """
 
+
+rule count_host_mappings:
+    """
+    Counts how many times each oligo is mapped across all host genomes.
+    """
+    input:
+        matching_oligos=matching_oligos_txt
+    output:
+        counts=os.path.join(output_dirs["analysis"], "host_probe_counts.txt")
+    params:
+        output_dir=output_dirs["analysis"]
+    log:
+        os.path.join(logs_dir, "count_host_mappings.log")
+    shell:
+        """
+        mkdir -p {params.output_dir}
+        cat {input.matching_oligos} | sort | uniq -c | sort -nr > {output.counts} 2> {log}
+        """
+
+rule filter_high_host_hits:
+   input:
+       probes=os.path.join(output_dirs["probes"], "{design_stem}_probes.fasta"),
+       host_counts=os.path.join(output_dirs["analysis"], "host_probe_counts.txt") 
+   output:
+       filtered=os.path.join(output_dirs["probes"], "{design_stem}_host_filtered_probes.fasta")
+   params:
+       max_hits=lambda w: analysis_params.get("max_host_hits", 2),
+       temp_exclude=lambda w: f"temp_exclude_{w.design_stem}.txt"
+   wildcard_constraints:
+       design_stem="(puumala|orthohanta)_[LMS](_ends)?_ps\d+_m\d+"
+   log:
+       os.path.join(logs_dir, "filter_high_host_hits_{design_stem}.log")
+   conda:
+       os.path.join(conda_envs, "seqkit.yaml")
+   shell:
+       """
+       if [ -s {input.probes} ]; then
+           # Create exclude list with unique temp file
+           awk '$1 > {params.max_hits} {{print substr($0,9)}}' {input.host_counts} > {params.temp_exclude}
+           
+           if [ -s {params.temp_exclude} ]; then
+               seqkit grep -v -f {params.temp_exclude} {input.probes} -w 0 > {output.filtered} 2> {log}
+           else
+               cp {input.probes} {output.filtered}
+           fi
+           rm -f {params.temp_exclude}
+       else
+           touch {output.filtered}
+       fi
+       """
+
 ################################################
 # Step 4: Combine + Filter
 ################################################
 
 rule combine_candidate_probes:
-    """
-    AFTER mapping each design individually, we combine all the design FASTAs into one file.
-    """
     input:
-        probes=all_design_probes,
-        # Add explicit dependency on mapping results
-        paf=paf_files,
-        matching_oligos=matching_oligos_txt
+        probes=expand(
+            os.path.join(output_dirs["probes"], "{design}_host_filtered_probes.fasta"),
+            design=[p.replace("_probes.fasta", "") for p in map(os.path.basename, all_design_probes)],
+
+        )
     output:
         combined=os.path.join(output_dirs["probes"], "all_candidate_probes.fasta")
-    params:
-        output_dir=output_dirs["probes"]
     log:
         os.path.join(logs_dir, "combine_candidate_probes.log")
     shell:
-        """
-        mkdir -p {params.output_dir}
-        cat {input.probes} > {output.combined} 2> {log}
-        """
+        "cat {input.probes} > {output.combined}"
 
 
 
@@ -490,6 +545,36 @@ rule final_probe_set:
         mkdir -p {params.output_dir}
         cp {input.filtered_probes} {output.final}
         """
+
+rule analyze_host_matches_in_final:
+    """
+    Identifies which oligos from host_probe_counts appear in final probe sets.
+    """
+    input:
+        host_counts=os.path.join(output_dirs["analysis"], "host_probe_counts.txt"),
+        final_probes=expand(
+            os.path.join(output_dirs["probes"], "final_probe_set_{m}.fasta"),
+            m=get_unique_mismatches()
+        )
+    output:
+        filtered_counts=os.path.join(output_dirs["analysis"], "final_probes_host_counts.txt")
+    log:
+        os.path.join(logs_dir, "analyze_host_matches_in_final.log")
+    conda:
+        os.path.join(conda_envs, "seqkit.yaml")
+    shell:
+        """
+        # Extract sequence IDs from final probe sets
+        cat {input.final_probes} | grep "^>" | cut -d ">" -f 2 > temp_probe_ids.txt
+
+        # Extract oligos and their counts, keeping only those in final probe sets
+        awk 'NR==FNR {{probes[$1]=1; next}} 
+             {{oligo=substr($0,9); if(probes[oligo]) print $0}}' \
+             temp_probe_ids.txt {input.host_counts} > {output.filtered_counts} 2> {log}
+        
+        rm temp_probe_ids.txt
+        """
+
 
 ################################################
 # Step 5: Validate (Coverage Analysis)
