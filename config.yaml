@@ -46,7 +46,8 @@ analysis:
   lcf_thres_puumala: 100
   mismatches_orthohanta: 5
   lcf_thres_orthohanta: 90
-
+  max_host_hits: 2  # Maximum allowed hits in host genomes
+  
 # Output directories
 output_dirs:
   probes: "results/probes"
